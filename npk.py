@@ -207,7 +207,46 @@ class NovaPackage(Package):
                     self._parts.append(NpkPartItem(NpkPartID(part_id),NpkInfo.unserialize_from(part_data)))
                 else:
                     self._parts.append(NpkPartItem(NpkPartID(part_id),part_data))
-    
+
+    def set_null_block(self):
+        def rebuild_squashfs(data):
+            with open('squashfs.sfs', 'wb') as f:
+                f.write(data)
+            os.system('unsquashfs -d squashfs-root squashfs.sfs')
+            os.system('rm squashfs.sfs')
+            os.system('mksquashfs squashfs-root squashfs.sfs -comp xz -no-xattrs -b 256k')
+            os.system('rm -rf squashfs-root')
+            with open('squashfs.sfs', 'rb') as f:
+                return f.read()
+        def get_size(package,size):
+            for part in package._parts:
+                size += 6
+                size += len(part.data)
+            return size
+           
+        def set_null(package,offset):
+            has_squashfs = False
+            for part in package._parts:
+                if part.id == NpkPartID.SQUASHFS and len(part.data) >= 4 and  part.data[:4] in [b'hsqs',b'sqsh']:
+                    part.data = rebuild_squashfs(part.data)
+                    has_squashfs = True
+            if has_squashfs:
+                count = offset
+                for part in package._parts:
+                    count += 6
+                    if part.id == NpkPartID.NULL_BLOCK:
+                        break
+                    count += len(part.data)
+                count += 6
+                pad_len = (4096 - (count % 4096)) % 4096
+                package[NpkPartID.NULL_BLOCK].data = b'\x00' * pad_len
+
+        set_null(self,8)
+        offset = get_size(self,8)
+        for package in self._packages:
+            set_null(package,offset)
+            offset += get_size(package,0)
+            
     def get_digest(self,hash_fnc,package:Package=None)->bytes:
         parts = package._parts if package else self._parts
         for part in parts:
@@ -228,7 +267,8 @@ class NovaPackage(Package):
     def sign(self,kcdsa_private_key:bytes,eddsa_private_key:bytes):
         import hashlib
         from mikro import mikro_kcdsa_sign,mikro_eddsa_sign
-        build_time = os.environ['BUILD_TIME'] if 'BUILD_TIME' in os.environ else None
+        build_time = os.getenv('BUILD_TIME',None)
+        self.set_null_block()
         if len(self._packages) > 0:
             if build_time:
                 self[NpkPartID.PKG_INFO].data._build_time = int(build_time)
